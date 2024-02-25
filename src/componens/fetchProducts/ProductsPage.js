@@ -1,36 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import CryptoJS from 'crypto-js'
-
-const filterDuplicates = (products) => {
-   const filteredProducts = new Map();
-
-   products.forEach((product) => {
-      if (!filteredProducts.has(product.id)) {
-         filteredProducts.set(product.id, product);
-      }
-   });
-
-   return Array.from(filteredProducts.values());
-};
-
-const fetchWithRetry = async (url, options, maxAttempts = 3) => {
-   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-         const response = await fetch(url, options);
-         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-         return await response.json();
-      } catch (error) {
-         console.error(`Attempt ${attempt} failed: ${error}`);
-         if (attempt === maxAttempts) throw error;
-      }
-   }
-};
+import { filterDuplicates } from './helpers/filterDuplicates';
+import { fetchWithRetry } from './helpers/fetchWithRetry';
 
 const ProductsPage = () => {
    const [isLoading, setIsLoading] = useState(false);
    const [products, setProducts] = useState([]);
    const [page, setPage] = useState(0); // Управление текущей страницей
    const [filter, setFilter] = useState({}); // Фильтры: product, price, brand
+   const [totalPages, setTotalPages] = useState(0);
 
    // Функция для загрузки товаров
    const fetchProducts = async (currentPage, currentFilter) => {
@@ -39,12 +17,15 @@ const ProductsPage = () => {
       const timestamp = new Date().toISOString().split('T')[0].replace(/-/g, '');
       const authKey = CryptoJS.MD5(`${password}_${timestamp}`).toString();
 
+      const action = Object.keys(currentFilter).length > 0 ? "filter" : "get_ids";
+      const itemsPerPage = 50;
+
       const requestBodyIds = {
-         action: "get_ids",
+         action: action,
          params: {
             ...currentFilter,
-            offset: currentPage * 50,
-            limit: 50,
+            offset: currentPage * itemsPerPage,
+            limit: itemsPerPage,
          },
       };
 
@@ -65,6 +46,9 @@ const ProductsPage = () => {
          const data = await responseIds.json();
 
          if (data && data.result) {
+            const totalItems = data.totalItems; // Измените это в соответствии с форматом вашего API
+            const totalPages = Math.ceil(totalItems / itemsPerPage);
+            setTotalPages(totalPages); // Обновляем состояние totalPages
             return data.result;
          }
          return [];
@@ -79,8 +63,55 @@ const ProductsPage = () => {
          if (productIds.length > 0) {
             fetchProductDetails(productIds); // Вызываем функцию для получения деталей товаров
          }
-      });
+      })
    }, [page, filter]);
+
+   const [filterOptions, setFilterOptions] = useState({ brand: [], price: [], product: [] }); // Пример
+
+   const fetchFilterOptions = async (fieldName, offset = 0, limit = 10) => {
+      const password = "Valantis";
+      const timestamp = new Date().toISOString().split('T')[0].replace(/-/g, '');
+      const authKey = CryptoJS.MD5(`${password}_${timestamp}`).toString();
+
+      const requestBody = {
+         action: "get_fields",
+         params: { field: fieldName, offset, limit },
+      };
+      try {
+         const response = await fetch('http://api.valantis.store:40000/', {
+            method: 'POST',
+            headers: {
+               'Content-Type': 'application/json',
+               'X-Auth': authKey,
+            },
+            body: JSON.stringify(requestBody),
+         });
+
+         if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+         }
+
+         const data = await response.json();
+         console.log(fieldName, data);
+         if (data && data.result) {
+            console.log(fieldName, data);
+            return data.result.filter(item => item != null);
+         }
+      } catch (error) {
+         console.error(`Ошибка при загрузке данных для ${fieldName}: `, error);
+      }
+      return [];
+   };
+
+   useEffect(() => {
+      Promise.all([
+         fetchFilterOptions('brand', 0, 10),
+         fetchFilterOptions('price', 0, 10),
+         fetchFilterOptions('product', 0, 10)
+      ]).then(([brands, prices, products]) => {
+         setFilterOptions({ brand: brands, price: prices, product: products });
+      }).catch(error => console.error("Ошибка при загрузке данных фильтров: ", error));
+   }, []);
 
    const fetchProductDetails = async (productIds) => {
       const password = "Valantis";
@@ -114,15 +145,26 @@ const ProductsPage = () => {
       }
    };
 
+
+
    // Обработчики событий для пагинации и фильтрации
    const handlePrevPage = () => setPage((prevPage) => Math.max(prevPage - 1, 0));
    const handleNextPage = () => setPage((prevPage) => prevPage + 1);
+
+   const [tempFilter, setTempFilter] = useState({});
    const handleFilterChange = (e) => {
       const { name, value } = e.target;
-      setFilter((prevFilters) => ({
-         ...prevFilters,
-         [name]: value,
+      setTempFilter(currentTempFilters => ({
+         ...currentTempFilters,
+         [name]: value
       }));
+   };
+   const applyFilters = () => {
+      setFilter(tempFilter);
+   };
+   const resetFilters = () => {
+      setFilter({}); // Сброс состояния фильтров
+      setPage(0); // Возврат к первой странице
    };
 
    return (
@@ -133,20 +175,37 @@ const ProductsPage = () => {
          ) : (
             <>
                <div>
-                  <input name="product" placeholder="Название" onChange={handleFilterChange} />
-                  <input name="price" placeholder="Цена" type="number" onChange={handleFilterChange} />
-                  <input name="brand" placeholder="Бренд" onChange={handleFilterChange} />
-                  <button onClick={() => fetchProducts(page, filter)}>Применить фильтры</button>
+                  <select name="product" onChange={handleFilterChange}>
+                     <option value="">Все товары</option>
+                     {filterOptions.product.map((product, index) => (
+                        <option key={index} value={product}>{product}</option>
+                     ))}
+                  </select>
+                  <select name="priceRange" onChange={handleFilterChange}>
+                     <option value="">Выберите диапазон цен</option>
+                     <option value="0-10000">До 10000</option>
+                     <option value="10000-50000">10000 - 50000</option>
+                     <option value="50000-">Более 50000</option>
+                  </select>
+                  <select name="brand" onChange={handleFilterChange}>
+                     <option value="">Все бренды</option>
+                     {filterOptions.brand.map((brand, index) => (
+                        <option key={index} value={brand}>{brand}</option>
+                     ))}
+                  </select>
+
+                  <button onClick={applyFilters}>Применить фильтры</button>
+                  <button onClick={resetFilters}>Сбросить фильтры</button>
                </div>
                <div>
-                  <button onClick={handlePrevPage}>Предыдущая страница</button>
-                  <button onClick={handleNextPage}>Следующая страница</button>
+                  <button onClick={handlePrevPage} disabled={page === 0}>Предыдущая страница</button>
+                  <button onClick={handleNextPage} disabled={page >= totalPages - 1}>Следующая страница</button>
                </div>
                <ul>
                   {products.map(({ id, product, price, brand }) => (
                      <li key={id}>{`ID: ${id}  ${product}  (${brand}) - ${price}₽`}</li>
                   ))}
-               </ul>.
+               </ul>
             </>
          )}
       </div>
